@@ -1,0 +1,10 @@
+[package]
+name = "fuzzytree"
+version = "0.1.0"
+authors = ["Matt Peterson <ricochet1k@gmail.com>"]
+
+[dependencies]
+termion = "^1.5.1"
+ignore = "^0.4.2"
+structopt = "~0"
+
