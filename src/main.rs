@@ -1,4 +1,4 @@
-#![feature(iterator_flatten, specialization, try_from)]
+#![feature(match_default_bindings, iterator_flatten, specialization, try_from)]
 
 #[macro_use]
 extern crate structopt;
@@ -20,6 +20,7 @@ use std::iter;
 use std::path::{Path, PathBuf};
 //use std::marker::PhantomData;
 //use std::borrow::Borrow;
+use std::iter::repeat;
 
 use structopt::StructOpt;
 
@@ -46,21 +47,20 @@ fn main() {
         file_list: FileList::new(&opts.path),
     };
 
-    let mut screenbox = ScreenBox { width: width.into(), height: height.into(), writer: &mut stdout };
-    let screeneventbox = ScreenBox { width: width.into(), height: height.into(), writer: () };
+    let mut screenbox = ScreenBox::new((width.into(), height.into());
 
     screen_state.render(&mut screenbox);
     screenbox.flush().unwrap();
 
     for c in stdin.events() {
         let evt = c.unwrap();
-        screen_state.handle_event(&screeneventbox, &evt);
+        screen_state.handle_event(&evt);
         match evt {
             Event::Key(Key::Char('q')) => break,
             Event::Mouse(me) => {
                 match me {
                     MouseEvent::Press(_, x, y) => {
-                        write!(screenbox, "{}x", termion::cursor::Goto(x, y)).unwrap();
+                        screenbox.draw_str_at((x as _, y as _), Style::default(), "x".to_string());
                     },
                     _ => (),
                 }
@@ -69,128 +69,230 @@ fn main() {
         }
 
         screen_state.render(&mut screenbox);
-        screenbox.flush().unwrap();
+        //screenbox.flush().unwrap();
     }
 }
 
-struct ScreenBox<T> {
-    width: usize,
-    height: usize,
-    writer: T,
+
+#[derive(Copy, Clone)]
+enum Color {
+    Indexed(u16),
+    RGB(u8, u8, u8),
 }
 
-impl<'a, 'b, T: Write> Write for ScreenBox<T> {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.writer.write(bytes)
-    }
+#[derive(Copy, Clone)]
+struct Style {
+    fg: Color,
+    bg: Color,
 
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.writer.flush()
-    }
 }
 
-use std::convert::TryInto;
-
-trait ToSigned
-    where
-        Self: std::convert::TryInto<<Self as ToSigned>::Signed>,
-        <Self as ToSigned>::Signed: std::convert::TryInto<Self>
-    {
-    type Signed;
-}
-impl ToSigned for usize { type Signed = isize; }
-
-enum Change<T: Copy + ToSigned>
-    {
-    By(<T as ToSigned>::Signed),
-    To(T),
-}
-
-use Change::*;
-
-impl<T: Copy + ToSigned> Change<T> 
-    where
-        <T as std::convert::TryInto<<T as ToSigned>::Signed>>::Error: std::fmt::Debug,
-        <<T as ToSigned>::Signed as std::convert::TryInto<T>>::Error: std::fmt::Debug,
-        T: std::ops::Add<Output = T>,
-        <T as ToSigned>::Signed: std::ops::Add<Output = <T as ToSigned>::Signed>,
-        <T as ToSigned>::Signed: Copy,
-    {
-    fn change(&self, val: T) -> T {
-        match *self {
-            Change::By(dv) => (val.try_into().unwrap() + dv).try_into().unwrap(),
-            Change::To(v) => v,
+impl Style {
+    fn default() -> Style {
+        Style {
+            fg: Color::Indexed(1),
+            bg: Color::Indexed(0),
         }
     }
 }
 
-impl<T: Copy> ScreenBox<T> {
-    fn shrink_copy(&self, w: Change<usize>, h: Change<usize>) -> ScreenBox<T> {
-        ScreenBox { width: w.change(self.width), height: h.change(self.height), writer: self.writer }
+#[derive(Clone)]
+struct StyledText {
+    style: Style,
+    text: Rc<String>,
+    width: u32,
+}
+
+impl StyledText {
+    fn new(style: Style, text: String) -> StyledText {
+        StyledText { style, text, width: unicode::width(&text) }
+    }
+
+}
+
+impl PaintableWidget for StyledText {
+    fn size(&self) -> (u32, u32) {
+        (self.width, 1)
+    }
+
+    fn draw_into<R: RawPaintable>(&self, target: R, pos: (u32, u32)) {
+        target.draw_text_at(pos, self.clone())
     }
 }
 
-impl<'a, T> ScreenBox<&'a T> {
-    fn shrink(&self, w: Change<usize>, h: Change<usize>) -> ScreenBox<&T> {
-        ScreenBox { width: w.change(self.width), height: h.change(self.height), writer: self.writer }
+
+#[derive(Clone)]
+struct Line {
+    // There are no gaps between these.
+    texts: Vec<StyledText>,
+}
+
+impl Line {
+    fn new(width: u32) -> Line {
+        Line {
+            texts: vec![
+                StyledText {
+                    style: Style::default(),
+                    text: Rc::new(" ".repeat(width as usize)),
+                    width: width,
+                }
+            ],
+        }
     }
 }
 
-impl<'a, T> ScreenBox<&'a mut T> {
-    fn shrink(&mut self, w: Change<usize>, h: Change<usize>) -> ScreenBox<&mut T> {
-        ScreenBox { width: w.change(self.width), height: h.change(self.height), writer: self.writer }
+impl Line {
+    fn draw_text_at(&mut self, x: u32, str: StyledText) {
+        // first, find the index of the text that x is in
+        let start_index = match self.texts.iter()
+            .scan(0 as u32, |i, &txt| Some(*i + txt.width))
+            .position(|i| i <= x) {
+                Some(i) => i,
+                None => return
+            };
+
+
     }
 }
+
+impl PaintableWidget for Line {
+    fn size(&self) -> (u32, u32) {
+        (self.texts.iter().map(|t| t.width).sum(), 1)
+    }
+
+    fn draw_into<R: RawPaintable>(&self, target: R, pos: (u32, u32)) {
+        let mut width_so_far = 0;
+        for t in self.texts.iter() {
+            t.draw_into(target, (x + width_so_far, pos.1));
+            width_so_far += t.width;
+        }
+    }
+    fn draw_delta_into<R: RawPaintable>(&mut self, target: R, (x, y): (u32, u32)) {
+        let mut width_so_far = 0;
+        for t in self.texts.iter() {
+            t.draw_delta_into(target, (pos.0 + width_so_far, pos.1));
+            width_so_far += t.width;
+        }
+    }
+}
+
+struct ScreenBox {
+    size: (u32, u32),
+    lines: Vec<Line>,
+}
+
+impl ScreenBox {
+    fn new(size: (u32, u32)) -> ScreenBox {
+        ScreenBox {
+            size,
+            lines: repeat(Line::new(size.0)).take(size.1).collect(),
+        }
+    }
+}
+
+trait RawPaintable {
+    fn size(&self) -> (u32, u32);
+    fn draw_text_at(&mut self, pos: (u32, u32), text: StyledText);
+}
+
+trait FancyPaintable: RawPaintable {
+    fn draw_str_at(&mut self, pos: (u32, u32), style: Style, str: String) {
+        self.draw_text_at(pos, StyledText::new(style, str));
+    }
+}
+impl<T: RawPaintable> FancyPaintable for T {}
+
+trait PaintableWidget {
+    fn size(&self) -> (u32, u32);
+    fn draw_into<R: RawPaintable>(&self, target: R, pos: (u32, u32));
+    fn draw_delta_into<R: RawPaintable>(&mut self, target: R, pos: (u32, u32)) {
+        // if there isn't a faster implementation, just call draw_into
+        self.draw_into(target, pos)
+    }
+}
+
+impl RawPaintable for ScreenBox {
+    fn size(&self) -> (u32, u32) {
+        self.size
+    }
+
+    fn draw_text_at(&mut self, pos: (u32, u32), text: StyledText) {
+        if pos.1 < self.size.1 && pos.1 as usize < self.lines.len() {
+            self.lines[pos.1 as usize].draw_text_at(pos.0, text)
+        }
+    }
+}
+
+impl PaintableWidget for ScreenBox {
+    fn size(&self) -> (u32, u32) {
+        self.size
+    }
+
+    fn draw_into<R: RawPaintable>(&self, target: R, pos: (u32, u32)) {
+        for (i, l) in self.lines.iter().enumerate() {
+            l.draw_into(target, (pos.0, pos.1 + i as u32))
+        }
+    }
+    fn draw_delta_into<R: RawPaintable>(&mut self, target: R, pos: (u32, u32)) {
+        for (i, l) in self.lines.iter().enumerate() {
+            l.draw_delta_into(target, (pos.0, pos.1 + i as u32))
+        }
+    }
+}
+
+
 
 
 trait ScreenObject {
-    fn render<W: Write>(&self, w: &mut ScreenBox<&mut W>);
-    fn handle_event(&mut self, w: &ScreenBox<()>, e: &Event);
+    fn handle_event(&mut self, e: &Event);
 }
 
 
 struct ScreenState {
+    screenbox: ScreenBox,
     file_list: FileList,
 }
 impl ScreenObject for ScreenState {
-    fn render<W: Write>(&self, w: &mut ScreenBox<&mut W>) {
-        write!(w, "{}{}{}", clear::All, termion::cursor::Goto(1, 1), termion::cursor::Hide).unwrap();
-        self.file_list.render(w);
-    }
-    fn handle_event(&mut self, b: &ScreenBox<()>, e: &Event) {
-        self.file_list.handle_event(b, e);
+    //fn render(&self, w: &mut ScreenBox) {
+        //write!(w, "{}{}{}", clear::All, termion::cursor::Goto(1, 1), termion::cursor::Hide).unwrap();
+        //self.file_list.render(w);
+    //}
+    fn handle_event(&mut self, e: &Event) {
+        self.file_list.handle_event(e);
+        self.file_list.draw_delta_into((0, 0), self.screenbox);
     }
 }
 
 struct ScreenList<T: ItemScreenObject> {
+    screenbox: ScreenBox,
     txt: String,
-    skip: usize,
-    selected: usize,
+    skip: u32,
+    selected: u32,
     items: Vec<T>,
 }
 
-impl<T: ItemScreenObject> ScreenObject for ScreenList<T> {
-    fn render<W: Write>(&self, w: &mut ScreenBox<&mut W>) {
-        let mut first = true;
-        let wh = w.height;
-        write!(w, "{}\r\n", wh).unwrap();
+impl<T: ItemScreenObject> ScreenList<T> {
+    fn render(&self) {
+        self.screenbox.draw_str_at((0, 0), Style::default(),
+            format!("{}", self.screenbox.size.1));
         for (i, f) in self.items.iter().enumerate() {
-            if i < self.skip { continue }
-            if i - self.skip >= w.height - 1 { break }
+            if i as u32 < self.skip { continue }
+            if i as u32 - self.skip >= self.screenbox.size.1 - 1 { break }
 
-            if first { first = false; }
-            else { write!(w, "\r\n").unwrap(); }
-
-            if i == self.selected {
-                write!(w, "{}", style::Invert).unwrap();
-            }
-            f.render(&mut w.shrink(By(0), To(1)), i == self.selected);
-            if i == self.selected {
-                write!(w, "{}", style::NoInvert).unwrap();
-            }
+            //if i == self.selected {
+                //write!(w, "{}", style::Invert).unwrap();
+            //}
+            f.render(i as u32 == self.selected);
+            //if i as u32 == self.selected {
+                //write!(w, "{}", style::NoInvert).unwrap();
+            //}
         }
     }
-    fn handle_event(&mut self, b: &ScreenBox<()>, e: &Event) {
+
+}
+
+impl<T: ItemScreenObject> ScreenObject for ScreenList<T> {
+    fn handle_event(&mut self, e: &Event) {
         let b = &b.shrink_copy(By(0), By(-1));
         match e {
             &Event::Key(Key::Up) |
@@ -200,49 +302,31 @@ impl<T: ItemScreenObject> ScreenObject for ScreenList<T> {
             _ => { },
         }
     }
-
 }
 
 impl<T: ItemScreenObject> ScreenList<T> {
-    fn move_selected(&mut self, d: isize, b: &ScreenBox<()>) {
+    fn move_selected(&mut self, d: isize, b: &ScreenBox) {
         let len = self.items.len() as isize;
         let sel = ((self.selected as isize) + d) % len;
 
-        self.selected = if sel < 0 { sel + len } else { sel } as usize;
+        self.selected = if sel < 0 { sel + len } else { sel } as u32;
 
         if self.selected < self.skip {
             self.skip = self.selected;
-        } else if self.selected - self.skip >= b.height {
-            self.txt = format!("skip adjusted: {}, {}, {}", self.selected, self.skip, b.height);
-            self.skip = self.selected - (b.height - 1);
+        } else if self.selected - self.skip >= b.size.1 {
+            self.txt = format!("skip adjusted: {}, {}, {}", self.selected, self.skip, b.size.1);
+            self.skip = self.selected - (b.size.1 - 1);
         }
-
     }
 }
 
 trait ItemScreenObject {
-    fn render<W: Write>(&self, w: &mut ScreenBox<&mut W>, selected: bool);
-    fn handle_event<W: Write>(&mut self, b: &ScreenBox<W>, e: &Event, selected: bool);
+    fn handle_event(&mut self, e: &Event, selected: bool);
 }
-/*default impl<T: ItemScreenObject> ScreenObject for T {
-    fn render<W: Write>(&self, w: &mut W) {
-        self.render(w, false)
-    }
-    fn handle_event<W: Write>(&self, e: &Event) {
-        self.handle_event(e, false)
-    }
-}
-default impl<T: ScreenObject> ItemScreenObject for T {
-    fn render<W: Write>(&self, w: &mut W, selected: bool) {
-        self.render(w)
-    }
-    fn handle_event<W: Write>(&self, e: &Event, selected: bool) {
-        self.handle_event(e)
-    }
-}*/
 
 
 struct FileList {
+    screenbox: ScreenBox,
     path: PathBuf,
     files: Vec<FileTreeItem>,
     screen_list: ScreenList<FileItem>,
@@ -250,12 +334,14 @@ struct FileList {
 }
 
 impl FileList {
-    fn new<P: AsRef<Path>>(p: &P) -> FileList {
+    fn new<P: AsRef<Path>>(p: &P, screenbox: ScreenBox) -> FileList {
         let files = FileList::get_files(p);
         let mut fl = FileList {
+            screenbox,
             path: p.as_ref().to_path_buf(),
             files: files,
             screen_list: ScreenList {
+                screenbox: ScreenBox::new((screenbox.size.0, screenbox.size.1 - 1)),
                 txt: "".to_string(),
                 skip: 0,
                 selected: 0,
@@ -289,12 +375,16 @@ impl FileList {
     }
 }
 
-impl ScreenObject for FileList {
-    fn render<W: Write>(&self, w: &mut ScreenBox<&mut W>) {
+impl FileList {
+    fn render(&self) {
+
         write!(w, "{} {}\r\n", self.path.to_string_lossy(), self.txt).unwrap();
-        self.screen_list.render(&mut w.shrink(By(0), By(-1)));
+        self.screen_list.screenbox.draw_delta_into(self.screenbox, (0, 1));
     }
-    fn handle_event(&mut self, b: &ScreenBox<()>, e: &Event) {
+}
+
+impl ScreenObject for FileList {
+    fn handle_event(&mut self, e: &Event) {
         let b = &b.shrink_copy(By(0), By(-1));
         match e {
             &Event::Key(Key::Char('\n')) => {
@@ -303,7 +393,7 @@ impl ScreenObject for FileList {
                 self.txt = format!("{:?}", res);
             },
             _ => {
-                self.screen_list.handle_event(b, e)
+                self.screen_list.handle_event(e)
             },
         }
     }
@@ -316,26 +406,27 @@ enum TreeCommand {
 #[derive(Debug)]
 enum CommandResponse {
     // Contains total number of visible children walked over
-    Continue(usize),
+    Continue(u32),
     Done,
 }
 
 struct FileItem {
+    screenbox: ScreenBox,
     entry: DirEntry,
     expanded: bool,
     indent: u32,
 }
 
-impl ItemScreenObject for FileItem {
-    fn render<W: Write>(&self, w: &mut ScreenBox<&mut W>, selected: bool) {
+impl FileItem {
+    fn render(&mut self, selected: bool) {
         let sel_prefix = if selected { ">" } else { " " };
         let mut type_prefix = "-";
         let indent = "  ".repeat(self.indent as usize);
         let path = self.entry.path();
         let mut path = path.file_name()
-        	.map(|f| f.to_string_lossy().into_owned())
-        	.unwrap_or_else(|| format!("<no_filename {}>", path.display()));
-        	//path.strip_prefix(".").unwrap().to_string_lossy();
+            .map(|f| f.to_string_lossy().into_owned())
+            .unwrap_or_else(|| format!("<no_filename {}>", path.display()));
+            //path.strip_prefix(".").unwrap().to_string_lossy();
 
         if let Some(filetype) = self.entry.file_type() {
             if filetype.is_dir() {
@@ -345,9 +436,13 @@ impl ItemScreenObject for FileItem {
 
         }
 
-        write!(w, "{}{} {} {}", indent, sel_prefix, type_prefix, path).unwrap();
+        self.screenbox.draw_str_at((0, 0), Style::default(),
+            format!("{}{} {} {}", indent, sel_prefix, type_prefix, path));
     }
-    fn handle_event<W: Write>(&mut self, _b: &ScreenBox<W>, e: &Event, selected: bool) {
+}
+
+impl ItemScreenObject for FileItem {
+    fn handle_event(&mut self, e: &Event, selected: bool) {
         match e {
             _ => {
             },
@@ -382,13 +477,13 @@ impl FileTreeItem {
         Box::new(i)
     }
 
-    fn walk_command(&mut self, index: usize, cmd: &TreeCommand) -> CommandResponse {
+    fn walk_command(&mut self, index: u32, cmd: &TreeCommand) -> CommandResponse {
         if index == 0 {
             // command applies to me!
             return match cmd {
                 TreeCommand::SetExpanded(exp) => {
                     if self.is_dir() {
-                        self.expanded = match exp {
+                        self.expanded = match *exp {
                             None => !self.expanded,
                             Some(val) => !!val,
                         };
@@ -414,7 +509,7 @@ impl FileTreeItem {
         CommandResponse::Continue(1)
     }
 
-    fn walk_command_children(children: &mut Vec<FileTreeItem>, index: usize, cmd: &TreeCommand) -> CommandResponse {
+    fn walk_command_children(children: &mut Vec<FileTreeItem>, index: u32, cmd: &TreeCommand) -> CommandResponse {
         let mut count = 0;
 
         for mut child in children {
