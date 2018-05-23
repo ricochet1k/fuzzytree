@@ -8,4 +8,5 @@ termion = "^1.5.1"
 ignore = "^0.4.2"
 structopt = "~0"
 unicode-width = "~0"
+bitfield = "0.13"
 

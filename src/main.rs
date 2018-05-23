@@ -37,8 +37,6 @@ fn main() {
 
     let (width, height) = terminal_size().unwrap();
     println!("Terminal size is {}, {}", width, height);
-    //let width = 20 as u32;
-    //let height = 15 as u32;
 
     let stdin = stdin();
     let stdout = MouseTerminal::from(stdout().into_raw_mode().unwrap());
@@ -53,14 +51,10 @@ fn main() {
 
     write!(stdout, "{}", termion::clear::All).unwrap();
 
-    //let mut screenbox = ScreenBox::new((width.into(), height.into()));
     let mut terminal = Terminal::new(stdout, (width as _, height as _));
-
 
     screen_state.screenbox.draw_into(&mut terminal, (0, 0));
     terminal.flush().unwrap();
-    //screen_state.render(&mut screenbox);
-    //screenbox.flush().unwrap();
 
     for c in stdin.events() {
         let evt = c.unwrap();
@@ -81,8 +75,6 @@ fn main() {
 
         screen_state.screenbox.draw_delta_into(&mut terminal, (0, 0));
         terminal.flush().unwrap();
-        //screen_state.render(&mut screenbox);
-        //screenbox.flush().unwrap();
     }
 }
 
@@ -130,13 +122,32 @@ impl<T: ItemScreenObject> ScreenList<T> {
         sl.render();
         sl
     }
+
+    fn set_items(&mut self, items: Vec<T>) {
+        //let old_items = self.items;
+        let visible_end = (self.skip + self.screenbox.size().1) as usize;
+        if self.items.len() > items.len() && items.len() < visible_end {
+            // need to erase some lines from the end
+            let erase_lines = std::cmp::min(self.items.len() - items.len(), visible_end - items.len()) as u32;
+            for i in (self.items.len() as u32 - self.skip - erase_lines)..(self.items.len() as u32 + 1) {
+                self.screenbox.clear_line((0, i), Style::default());
+            }
+            self.txt = format!("Erased: {}", erase_lines);
+        }
+        else {
+            self.txt = format!("No erase: {}, {}, {}, {}", self.items.len(), items.len(), visible_end, self.screenbox.size().1);
+        }
+        self.items = items;
+        self.items[self.selected as usize].set_selected(true);
+        self.render();
+    }
 }
 
 impl<T: ItemScreenObject> ScreenList<T> {
     fn render(&mut self) {
         let height = self.screenbox.size().1;
         self.screenbox.draw_str_at((0, 0), Style::default(),
-            format!("{}", height));
+            format!("{}, {}", height, self.txt));
         for (i, f) in self.items.iter_mut().enumerate() {
             if (i as u32) < self.skip { continue }
             if (i as u32) - self.skip >= self.screenbox.size().1 - 1 { break }
@@ -235,10 +246,9 @@ impl FileList {
     }
 
     fn update_list(&mut self) {
-        let items: Vec<_> = self.files.iter().flat_map(|x| x.iter_file_items(0)).collect();
+        let items: Vec<_> = self.files.iter().flat_map(|x| x.iter_file_items(self.screenbox.size().0, 0)).collect();
         //println!("items: {}", items.len());
-        self.screen_list.items = items;
-        self.screen_list.render();
+        self.screen_list.set_items(items);
     }
 }
 
@@ -294,7 +304,6 @@ impl FileItem {
         let mut path = path.file_name()
             .map(|f| f.to_string_lossy().into_owned())
             .unwrap_or_else(|| format!("<no_filename {}>", path.display()));
-            //path.strip_prefix(".").unwrap().to_string_lossy();
 
         if let Some(filetype) = self.entry.file_type() {
             if filetype.is_dir() {
@@ -304,7 +313,11 @@ impl FileItem {
 
         }
 
-        self.screenbox.draw_str_at((0, 0), Style::default(),
+        let mut style = Style::default();
+        if selected {
+            style = style.set(StyleAttr::Invert);
+        }
+        self.screenbox.draw_str_at((0, 0), style,
             format!("{}{} {} {}", indent, sel_prefix, type_prefix, path));
     }
 }
@@ -342,12 +355,14 @@ impl FileTreeItem {
         }
     }
 
-    fn iter_file_items<'a>(self: &'a Self, indent: u32) -> Box<Iterator<Item=FileItem> + 'a> {
-        let i = iter::once(FileItem{ screenbox: ScreenBox::new((1, 1)), entry: self.entry.clone(), expanded: self.expanded, indent });
+    fn iter_file_items<'a>(&'a self, width: u32, indent: u32) -> Box<Iterator<Item=FileItem> + 'a> {
+        let mut me = FileItem{ screenbox: ScreenBox::new((width, 1)), entry: self.entry.clone(), expanded: self.expanded, indent };
+        me.render(false);
+        let i = iter::once(me);
 
         if self.expanded {
             if let Some(children) = &self.children {
-                return Box::new(i.chain(children.iter().flat_map(move |x| x.iter_file_items(indent + 1))));
+                return Box::new(i.chain(children.iter().flat_map(move |x| x.iter_file_items(width, indent + 1))));
             }
         }
 

@@ -18,7 +18,7 @@ pub struct Terminal<W: Write> {
 impl<W: Write> Terminal<W> {
     pub fn new(mut w: W, size: (u32, u32)) -> Terminal<W> {
         let current_style = Style::default();
-        write!(w, "{}", current_style);
+        write!(w, "{}", current_style).unwrap();
         Terminal {
             size,
             current_style,
@@ -60,28 +60,133 @@ impl Color {
     }
 }
 
+bitfield!{
+    #[derive(Copy, Clone)]
+    pub struct StyleAttrs(u16);
+    impl Debug;
+    bold, set_bold: 0;
+    italic, set_italic: 1;
+    faint, set_faint: 2;
+    framed, set_framed: 3;
+    invert, set_invert: 4;
+    underline, set_underline: 5;
+}
+
+pub enum StyleAttr {
+    Bold,
+    Italic,
+    Faint,
+    Framed,
+    Invert,
+    Underline,
+}
+
+impl StyleAttr {
+    fn isset_in(&self, attrs: &StyleAttrs) -> bool {
+        match self {
+            StyleAttr::Bold => attrs.bold(),
+            StyleAttr::Italic => attrs.italic(),
+            StyleAttr::Faint => attrs.faint(),
+            StyleAttr::Framed => attrs.framed(),
+            StyleAttr::Invert => attrs.invert(),
+            StyleAttr::Underline => attrs.underline(),
+        }
+    }
+
+    fn set_to_in(&self, to: bool, attrs: &mut StyleAttrs) {
+        match self {
+            StyleAttr::Bold => attrs.set_bold(to),
+            StyleAttr::Italic => attrs.set_italic(to),
+            StyleAttr::Faint => attrs.set_faint(to),
+            StyleAttr::Framed => attrs.set_framed(to),
+            StyleAttr::Invert => attrs.set_invert(to),
+            StyleAttr::Underline => attrs.set_underline(to),
+        }
+    }
+}
+
+
 #[derive(Debug, Copy, Clone)]
 pub struct Style {
     fg: Color,
     bg: Color,
-
+    attrs: StyleAttrs,
 }
 
 impl Style {
-    pub fn default() -> Style {
+    pub fn set_fg(&self, c: Color) -> Style {
+        Style{
+            fg: c,
+            bg: self.bg,
+            attrs: self.attrs,
+        }
+    }
+
+    pub fn set_bg(&self, c: Color) -> Style {
+        Style{
+            fg: self.fg,
+            bg: c,
+            attrs: self.attrs,
+        }
+    }
+
+    pub fn isset(&self, a: StyleAttr) -> bool {
+        a.isset_in(&self.attrs)
+    }
+
+    pub fn set(&self, a: StyleAttr) -> Style {
+        let mut newattrs = self.attrs;
+        a.set_to_in(true, &mut newattrs);
+        Style {
+            fg: self.fg,
+            bg: self.bg,
+            attrs: newattrs,
+        }
+    }
+
+    pub fn clear(&self, a: StyleAttr) -> Style {
+        let mut newattrs = self.attrs;
+        a.set_to_in(false, &mut newattrs);
+        Style {
+            fg: self.fg,
+            bg: self.bg,
+            attrs: newattrs,
+        }
+    }
+
+    pub fn toggle(&self, a: StyleAttr) -> Style {
+        let mut newattrs = self.attrs;
+        a.set_to_in(!a.isset_in(&self.attrs), &mut newattrs);
+        Style {
+            fg: self.fg,
+            bg: self.bg,
+            attrs: newattrs,
+        }
+    }
+}
+
+impl Default for Style {
+    fn default() -> Style {
         Style {
             fg: Color::Default,
             bg: Color::Default,
+            attrs: StyleAttrs(0),
         }
     }
 }
 
 impl Display for Style {
     fn fmt(&self, f: &mut Formatter) -> Result<(), std::fmt::Error> {
-        let fg = self.fg.termion_color();
-        let bg = self.bg.termion_color();
-        fg.write_fg(f)?;
-        bg.write_bg(f)
+        self.fg.termion_color().write_fg(f)?;
+        self.bg.termion_color().write_bg(f)?;
+        write!(f, "{}", termion::style::Reset)?;
+        if self.attrs.bold() { write!(f, "{}", termion::style::Bold)? }
+        if self.attrs.italic() { write!(f, "{}", termion::style::Italic)? }
+        if self.attrs.faint() { write!(f, "{}", termion::style::Faint)? }
+        if self.attrs.framed() { write!(f, "{}", termion::style::Framed)? }
+        if self.attrs.invert() { write!(f, "{}", termion::style::Invert)? }
+        if self.attrs.underline() { write!(f, "{}", termion::style::Underline)? }
+        Ok(())
     }
 }
 
@@ -280,6 +385,11 @@ pub trait RawPaintable: HasSize {
 
     fn draw_str_at(&mut self, pos: (u32, u32), style: Style, str: String) {
         self.draw_text_at(pos, &StyledText::new(style, str));
+    }
+
+    fn clear_line(&mut self, pos: (u32, u32), style: Style) {
+        let spaces = " ".repeat(self.size().0 as _);
+        self.draw_str_at(pos, style, spaces);
     }
 }
 
