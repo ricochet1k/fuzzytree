@@ -1,11 +1,10 @@
 #![feature(collections_range, iterator_flatten, specialization, try_from)]
 
-extern crate fuzzytree;
 #[macro_use]
 extern crate structopt;
 extern crate termion;
 extern crate ignore;
-extern crate unicode_width;
+extern crate termrect;
 
 use termion::event::{Key, Event, MouseEvent};
 use termion::input::{TermRead, MouseTerminal};
@@ -21,7 +20,7 @@ use std::path::{Path, PathBuf};
 
 use structopt::StructOpt;
 
-use fuzzytree::screenbox::*;
+use termrect::{Terminal, TermRect, Style, StyleAttr, RawPaintable, PaintableWidget, HasSize, HasTermRect};
 
 
 #[derive(StructOpt, Debug)]
@@ -44,8 +43,8 @@ fn main() {
     let mut stdout = stdout.lock();
 
     let mut screen_state = ScreenState{
-        screenbox: ScreenBox::new((width as _, height as _)),
-        file_list: FileList::new(&opts.path, ScreenBox::new((width as _, (height-1) as _))),
+        termrect: TermRect::new((width as _, height as _)),
+        file_list: FileList::new(&opts.path, TermRect::new((width as _, (height-1) as _))),
     };
     screen_state.render();
 
@@ -53,7 +52,7 @@ fn main() {
 
     let mut terminal = Terminal::new(stdout, (width as _, height as _));
 
-    screen_state.screenbox.draw_into(&mut terminal, (0, 0));
+    screen_state.termrect.draw_into(&mut terminal, (0, 0));
     terminal.flush().unwrap();
 
     for c in stdin.events() {
@@ -63,7 +62,7 @@ fn main() {
             Event::Mouse(me) => {
                 match me {
                     MouseEvent::Press(_, x, y) => {
-                        screen_state.screenbox.draw_str_at(((x-1) as _, (y-1) as _), Style::default(), "x".to_string());
+                        screen_state.termrect.draw_str_at(((x-1) as _, (y-1) as _), Style::default(), "x".to_string());
                     },
                     _ => (),
                 }
@@ -73,7 +72,7 @@ fn main() {
             }
         }
 
-        screen_state.screenbox.draw_delta_into(&mut terminal, (0, 0));
+        screen_state.termrect.draw_delta_into(&mut terminal, (0, 0));
         terminal.flush().unwrap();
     }
 }
@@ -87,12 +86,12 @@ trait ScreenObject {
 
 
 struct ScreenState {
-    screenbox: ScreenBox,
+    termrect: TermRect,
     file_list: FileList,
 }
 impl ScreenState {
     fn render(&mut self) {
-        self.file_list.screenbox.draw_delta_into(&mut self.screenbox, (0, 0));
+        self.file_list.termrect.draw_delta_into(&mut self.termrect, (0, 0));
     }
 }
 impl ScreenObject for ScreenState {
@@ -103,7 +102,7 @@ impl ScreenObject for ScreenState {
 }
 
 struct ScreenList<T: ItemScreenObject> {
-    screenbox: ScreenBox,
+    termrect: TermRect,
     txt: String,
     skip: u32,
     selected: u32,
@@ -113,7 +112,7 @@ struct ScreenList<T: ItemScreenObject> {
 impl<T: ItemScreenObject> ScreenList<T> {
     fn new(size: (u32, u32), items: Vec<T>) -> ScreenList<T> {
         let mut sl = ScreenList {
-            screenbox: ScreenBox::new(size),
+            termrect: TermRect::new(size),
             txt: "".to_string(),
             skip: 0,
             selected: 0,
@@ -125,17 +124,13 @@ impl<T: ItemScreenObject> ScreenList<T> {
 
     fn set_items(&mut self, items: Vec<T>) {
         //let old_items = self.items;
-        let visible_end = (self.skip + self.screenbox.size().1) as usize;
+        let visible_end = (self.skip + self.termrect.size().1) as usize;
         if self.items.len() > items.len() && items.len() < visible_end {
             // need to erase some lines from the end
             let erase_lines = std::cmp::min(self.items.len() - items.len(), visible_end - items.len()) as u32;
             for i in (self.items.len() as u32 - self.skip - erase_lines)..(self.items.len() as u32 + 1) {
-                self.screenbox.clear_line((0, i), Style::default());
+                self.termrect.clear_line((0, i), Style::default());
             }
-            self.txt = format!("Erased: {}", erase_lines);
-        }
-        else {
-            self.txt = format!("No erase: {}, {}, {}, {}", self.items.len(), items.len(), visible_end, self.screenbox.size().1);
         }
         self.items = items;
         self.items[self.selected as usize].set_selected(true);
@@ -145,18 +140,18 @@ impl<T: ItemScreenObject> ScreenList<T> {
 
 impl<T: ItemScreenObject> ScreenList<T> {
     fn render(&mut self) {
-        let height = self.screenbox.size().1;
-        self.screenbox.draw_str_at((0, 0), Style::default(),
+        let height = self.termrect.size().1;
+        self.termrect.draw_str_at((0, 0), Style::default(),
             format!("{}, {}", height, self.txt));
         for (i, f) in self.items.iter_mut().enumerate() {
             if (i as u32) < self.skip { continue }
-            if (i as u32) - self.skip >= self.screenbox.size().1 - 1 { break }
+            if (i as u32) - self.skip >= self.termrect.size().1 - 1 { break }
 
             //if i == self.selected {
                 //write!(w, "{}", style::Invert).unwrap();
             //}
             //f.render(i as u32 == self.selected);
-            f.draw_delta_into(&mut self.screenbox, (0, (i as u32 - self.skip + 1)));
+            f.draw_delta_into(&mut self.termrect, (0, (i as u32 - self.skip + 1)));
             //if i as u32 == self.selected {
                 //write!(w, "{}", style::NoInvert).unwrap();
             //}
@@ -193,9 +188,9 @@ impl<T: ItemScreenObject> ScreenList<T> {
 
         if self.selected < self.skip {
             self.skip = self.selected;
-        } else if self.selected - self.skip >= self.screenbox.size().1 {
-            self.txt = format!("skip adjusted: {}, {}, {}", self.selected, self.skip, self.screenbox.size().1);
-            self.skip = self.selected - (self.screenbox.size().1 - 1);
+        } else if self.selected - self.skip >= self.termrect.size().1 {
+            self.txt = format!("skip adjusted: {}, {}, {}", self.selected, self.skip, self.termrect.size().1);
+            self.skip = self.selected - (self.termrect.size().1 - 1);
         }
     }
 }
@@ -207,7 +202,7 @@ trait ItemScreenObject: PaintableWidget {
 
 
 struct FileList {
-    screenbox: ScreenBox,
+    termrect: TermRect,
     path: PathBuf,
     files: Vec<FileTreeItem>,
     screen_list: ScreenList<FileItem>,
@@ -215,11 +210,11 @@ struct FileList {
 }
 
 impl FileList {
-    fn new<P: AsRef<Path>>(p: &P, screenbox: ScreenBox) -> FileList {
+    fn new<P: AsRef<Path>>(p: &P, termrect: TermRect) -> FileList {
         let files = FileList::get_files(p);
-        let size = screenbox.size();
+        let size = termrect.size();
         let mut fl = FileList {
-            screenbox,
+            termrect,
             path: p.as_ref().to_path_buf(),
             files: files,
             screen_list: ScreenList::new((size.0, size.1 - 1), vec![]),
@@ -246,7 +241,7 @@ impl FileList {
     }
 
     fn update_list(&mut self) {
-        let items: Vec<_> = self.files.iter().flat_map(|x| x.iter_file_items(self.screenbox.size().0, 0)).collect();
+        let items: Vec<_> = self.files.iter().flat_map(|x| x.iter_file_items(self.termrect.size().0, 0)).collect();
         //println!("items: {}", items.len());
         self.screen_list.set_items(items);
     }
@@ -255,9 +250,9 @@ impl FileList {
 impl FileList {
     fn render(&mut self) {
         //write!(w, "{} {}\r\n", self.path.to_string_lossy(), self.txt).unwrap();
-        self.screenbox.draw_str_at((0, 0), Style::default(),
+        self.termrect.draw_str_at((0, 0), Style::default(),
             format!("{} {}", self.path.to_string_lossy(), self.txt));
-        self.screen_list.screenbox.draw_delta_into(&mut self.screenbox, (0, 1));
+        self.screen_list.termrect.draw_delta_into(&mut self.termrect, (0, 1));
     }
 }
 
@@ -289,7 +284,7 @@ enum CommandResponse {
 }
 
 struct FileItem {
-    screenbox: ScreenBox,
+    termrect: TermRect,
     entry: DirEntry,
     expanded: bool,
     indent: u32,
@@ -308,7 +303,7 @@ impl FileItem {
         if let Some(filetype) = self.entry.file_type() {
             if filetype.is_dir() {
                 path = path + "/";
-                type_prefix = if self.expanded { "v" } else { ">" };
+                type_prefix = if self.expanded { "▼" } else { "▶" };
             }
 
         }
@@ -317,14 +312,15 @@ impl FileItem {
         if selected {
             style = style.set(StyleAttr::Invert);
         }
-        self.screenbox.draw_str_at((0, 0), style,
+        self.termrect.clear_line((0, 0), style);
+        self.termrect.draw_str_at((0, 0), style,
             format!("{}{} {} {}", indent, sel_prefix, type_prefix, path));
     }
 }
 
-impl HasScreenbox for FileItem {
-    fn screenbox(&self) -> &ScreenBox { &self.screenbox }
-    fn screenbox_mut(&mut self) -> &mut ScreenBox { &mut self.screenbox }
+impl HasTermRect for FileItem {
+    fn termrect(&self) -> &TermRect { &self.termrect}
+    fn termrect_mut(&mut self) -> &mut TermRect { &mut self.termrect}
 }
 
 impl ItemScreenObject for FileItem {
@@ -356,7 +352,12 @@ impl FileTreeItem {
     }
 
     fn iter_file_items<'a>(&'a self, width: u32, indent: u32) -> Box<Iterator<Item=FileItem> + 'a> {
-        let mut me = FileItem{ screenbox: ScreenBox::new((width, 1)), entry: self.entry.clone(), expanded: self.expanded, indent };
+        let mut me = FileItem{
+            termrect: TermRect::new((width, 1)),
+            entry: self.entry.clone(),
+            expanded: self.expanded,
+            indent
+        };
         me.render(false);
         let i = iter::once(me);
 
