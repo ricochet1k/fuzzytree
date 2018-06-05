@@ -20,7 +20,9 @@ use std::path::{Path, PathBuf};
 
 use structopt::StructOpt;
 
-use termrect::{Terminal, TermRect, Style, StyleAttr, RawPaintable, PaintableWidget, HasSize, HasTermRect};
+use termrect::{TermRect, Style, StyleAttr};
+use termrect::terminal::Terminal;
+use termrect::termrect::{RawPaintable, HasSize, PaintableWidget, HasTermRect};
 
 
 #[derive(StructOpt, Debug)]
@@ -44,7 +46,7 @@ fn main() {
 
     let mut screen_state = ScreenState{
         termrect: TermRect::new((width as _, height as _)),
-        file_list: FileList::new(&opts.path, TermRect::new((width as _, (height-1) as _))),
+        file_list: FileList::new(&opts.path, TermRect::new((width as _, height as _))),
     };
     screen_state.render();
 
@@ -52,7 +54,7 @@ fn main() {
 
     let mut terminal = Terminal::new(stdout, (width as _, height as _));
 
-    screen_state.termrect.draw_into(&mut terminal, (0, 0));
+    screen_state.termrect.draw_delta_into(&mut terminal, (0, 0));
     terminal.flush().unwrap();
 
     for c in stdin.events() {
@@ -101,9 +103,10 @@ impl ScreenObject for ScreenState {
     }
 }
 
+/// ScreenList implements a scrollable list where every item is a single line.
+/// One item can be selected.
 struct ScreenList<T: ItemScreenObject> {
     termrect: TermRect,
-    txt: String,
     skip: u32,
     selected: u32,
     items: Vec<T>,
@@ -113,7 +116,6 @@ impl<T: ItemScreenObject> ScreenList<T> {
     fn new(size: (u32, u32), items: Vec<T>) -> ScreenList<T> {
         let mut sl = ScreenList {
             termrect: TermRect::new(size),
-            txt: "".to_string(),
             skip: 0,
             selected: 0,
             items,
@@ -140,24 +142,20 @@ impl<T: ItemScreenObject> ScreenList<T> {
 
 impl<T: ItemScreenObject> ScreenList<T> {
     fn render(&mut self) {
-        let height = self.termrect.size().1;
-        self.termrect.draw_str_at((0, 0), Style::default(),
-            format!("{}, {}", height, self.txt));
         for (i, f) in self.items.iter_mut().enumerate() {
             if (i as u32) < self.skip { continue }
-            if (i as u32) - self.skip >= self.termrect.size().1 - 1 { break }
+            if (i as u32) - self.skip >= self.termrect.size().1 { break }
 
-            //if i == self.selected {
-                //write!(w, "{}", style::Invert).unwrap();
-            //}
-            //f.render(i as u32 == self.selected);
-            f.draw_delta_into(&mut self.termrect, (0, (i as u32 - self.skip + 1)));
-            //if i as u32 == self.selected {
-                //write!(w, "{}", style::NoInvert).unwrap();
-            //}
+            f.draw_into(&mut self.termrect, (0, (i as u32 - self.skip)));
         }
     }
 
+    fn render_one_item(&mut self, i: u32) {
+        if i < self.skip { return }
+        if i - self.skip >= self.termrect.size().1 { return }
+
+        self.items[i as usize].draw_delta_into(&mut self.termrect, (0, (i - self.skip)));
+    }
 }
 
 impl<T: ItemScreenObject> ScreenObject for ScreenList<T> {
@@ -167,9 +165,8 @@ impl<T: ItemScreenObject> ScreenObject for ScreenList<T> {
             &Event::Key(Key::Char('k')) => self.move_selected(-1),
             &Event::Key(Key::Down) |
             &Event::Key(Key::Char('j')) => self.move_selected(1),
-            _ => { },
+            _ => { return },
         };
-        self.render();
     }
 }
 
@@ -182,15 +179,23 @@ impl<T: ItemScreenObject> ScreenList<T> {
 
         if self.selected == new_sel { return }
 
+        let prev_selected = self.selected;
         self.items[self.selected as usize].set_selected(false);
         self.selected = new_sel;
         self.items[self.selected as usize].set_selected(true);
 
+
         if self.selected < self.skip {
             self.skip = self.selected;
+            self.render();
         } else if self.selected - self.skip >= self.termrect.size().1 {
-            self.txt = format!("skip adjusted: {}, {}, {}", self.selected, self.skip, self.termrect.size().1);
             self.skip = self.selected - (self.termrect.size().1 - 1);
+            self.render();
+        }
+        else {
+            self.render_one_item(prev_selected);
+            let new_selected = self.selected;
+            self.render_one_item(new_selected);
         }
     }
 }
